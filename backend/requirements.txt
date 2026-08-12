@@ -6,3 +6,4 @@ torch
 opencv-python-headless
 pillow
 pydantic
+gradio
