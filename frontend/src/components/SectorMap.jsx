@@ -6,6 +6,7 @@ export default function SectorMap({ sectors }) {
     if (condition === 'WET') return '🔴 WET';
     if (condition === 'DAMP') return '🟡 DAMP';
     if (condition === 'DRY') return '🟢 DRY';
+    if (condition === 'INVALID') return '🚫 INVALID';
     return '⚪ NO DATA';
   };
 
@@ -20,30 +21,30 @@ export default function SectorMap({ sectors }) {
     if (trend === 'WETTING') return '↘ WETTING';
     if (trend === 'DRYING') return '↗ DRYING';
     if (trend === 'STABLE') return '→ STABLE';
-    if (trend === 'MIXED') return '〰 MIXED';
-    if (trend === 'NO DATA') return '';
-    return '→ STABLE';
+    if (trend === 'MIXED' || trend === 'UNCERTAIN') return '〰 UNCERTAIN';
+    if (trend === 'INSUFFICIENT DATA') return '⚪ INSUF. DATA';
+    if (!trend || trend === 'NO DATA') return '';
+    return trend;
   };
 
   return (
-    <div className="flex justify-between items-center bg-gray-800/50 p-4 rounded-xl border border-gray-700">
-      <div className="text-center">
-        <div className="text-xs text-gray-400 mb-1 font-bold">SECTOR 1</div>
-        <div className="font-black text-white">{getConditionDisplay(sectors?.sector_1?.condition)}</div>
-        <div className="text-xs text-gray-400 mt-1">{getTrendDisplay(sectors?.sector_1?.trend)}</div>
-      </div>
-      <div className="text-gray-600">❯</div>
-      <div className="text-center">
-        <div className="text-xs text-gray-400 mb-1 font-bold">SECTOR 2</div>
-        <div className="font-black text-white">{getConditionDisplay(sectors?.sector_2?.condition)}</div>
-        <div className="text-xs text-gray-400 mt-1">{getTrendDisplay(sectors?.sector_2?.trend)}</div>
-      </div>
-      <div className="text-gray-600">❯</div>
-      <div className="text-center">
-        <div className="text-xs text-gray-400 mb-1 font-bold">SECTOR 3</div>
-        <div className="font-black text-white">{getConditionDisplay(sectors?.sector_3?.condition)}</div>
-        <div className="text-xs text-gray-400 mt-1">{getTrendDisplay(sectors?.sector_3?.trend)}</div>
-      </div>
+    <div className="flex flex-col gap-4 font-mono text-sm h-64 justify-center">
+      {['sector_1', 'sector_2', 'sector_3', 'sector_4', 'sector_5'].map((sec, index) => {
+        const zoneLabels = ['TURN 1', 'TURN 4', 'TURN 8', 'TURN 11', 'TURN 15'];
+        const cond = sectors?.[sec]?.condition || 'NO DATA';
+        const condColor = cond === 'WET' ? 'text-red-500' : cond === 'DAMP' ? 'text-yellow-500' : cond === 'DRY' ? 'text-green-500' : cond === 'INVALID' ? 'text-red-900 line-through' : 'text-gray-600';
+        const dotColor = cond === 'WET' ? 'bg-red-500' : cond === 'DAMP' ? 'bg-yellow-500' : cond === 'DRY' ? 'bg-green-500' : cond === 'INVALID' ? 'bg-red-900' : 'bg-gray-600';
+        
+        return (
+          <div key={sec} className="flex items-center justify-between border-b border-gray-800/50 pb-3 last:border-0 last:pb-0">
+            <div className="flex items-center gap-3">
+              <div className={`w-2.5 h-2.5 rounded-full ${dotColor}`}></div>
+              <span className="text-gray-300 font-bold tracking-widest">{zoneLabels[index]}</span>
+            </div>
+            <span className={`font-black tracking-wider ${condColor}`}>{cond}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

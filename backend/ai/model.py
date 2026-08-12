@@ -9,14 +9,16 @@ class VisionModel:
             model="openai/clip-vit-base-patch32"
         )
         self.candidate_labels = [
-            "a completely dry racing track surface in sunny weather",
+            "a completely dry racing track surface, motorsport cars, tire smoke, clear weather",
             "a damp racing track with slight moisture and wet patches",
-            "a very wet racing track with standing water and heavy rain"
+            "a very wet racing track with standing water, heavy rain, water spray from cars",
+            "a stock market graph, text document, or an image entirely unrelated to motorsport"
         ]
         self.label_map = {
-            "a completely dry racing track surface in sunny weather": "DRY",
+            "a completely dry racing track surface, motorsport cars, tire smoke, clear weather": "DRY",
             "a damp racing track with slight moisture and wet patches": "DAMP",
-            "a very wet racing track with standing water and heavy rain": "WET"
+            "a very wet racing track with standing water, heavy rain, water spray from cars": "WET",
+            "a stock market graph, text document, or an image entirely unrelated to motorsport": "INVALID"
         }
 
     def infer(self, image: Image.Image):

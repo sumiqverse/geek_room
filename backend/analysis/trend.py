@@ -13,16 +13,18 @@ def analyze_trend(observations: List[Dict]) -> dict:
     Analyzes a list of observation dicts: [{"condition": "WET", "confidence": 0.92}, ...]
     Returns current condition, trend, visual_confidence, and trend_confidence.
     """
-    if not observations:
+    valid_obs = [obs for obs in observations if obs["condition"] != "INVALID"]
+
+    if not valid_obs:
         return {
-            "current_condition": "UNCERTAIN",
-            "trend": "UNCERTAIN",
+            "current_condition": "INVALID",
+            "trend": "INVALID DATA",
             "visual_confidence": 0.0,
             "trend_confidence": 0.0
         }
 
     # Filter out low confidence for condition smoothing
-    reliable_obs = [obs for obs in observations if obs["confidence"] >= 0.60]
+    reliable_obs = [obs for obs in valid_obs if obs["confidence"] >= 0.60]
     
     # 1. Current Condition
     if reliable_obs:
@@ -39,17 +41,17 @@ def analyze_trend(observations: List[Dict]) -> dict:
         visual_confidence = 0.0
 
     # 2. Trend Detection
-    if len(observations) < 2:
+    if len(valid_obs) < 2:
         return {
-            "current_condition": current_condition if current_condition != "UNCERTAIN" else observations[-1]["condition"],
-            "trend": "STABLE",
-            "visual_confidence": visual_confidence if visual_confidence > 0 else observations[-1]["confidence"],
-            "trend_confidence": observations[-1]["confidence"] * 0.8
+            "current_condition": current_condition if current_condition != "UNCERTAIN" else valid_obs[-1]["condition"],
+            "trend": "INSUFFICIENT DATA",
+            "visual_confidence": visual_confidence if visual_confidence > 0 else valid_obs[-1]["confidence"],
+            "trend_confidence": valid_obs[-1]["confidence"] * 0.8
         }
 
     # Evaluate trend over the whole sequence using ordinal values
     # We will use reliable observations for trend if possible
-    trend_obs = reliable_obs if len(reliable_obs) >= 2 else observations
+    trend_obs = reliable_obs if len(reliable_obs) >= 2 else valid_obs
     
     num_preds = [CONDITION_MAP[o["condition"]] for o in trend_obs]
     
@@ -79,14 +81,33 @@ def analyze_trend(observations: List[Dict]) -> dict:
     else:
         trend = "STABLE"
         
-    # Edge case: If overall confidence is super low, mark trend UNCERTAIN
+    # 3. Trend Confidence
+    # Make trend confidence mathematically explicit for judging:
+    # Trend confidence = average confidence of observations × trend consistency score
+    
+    # Calculate anomalies (sudden jumps from DRY to WET without DAMP transition)
+    anomalies = 0
+    for i in range(1, len(num_preds)):
+        jump = abs(num_preds[i] - num_preds[i-1])
+        if jump > 1:
+            anomalies += 1
+            
+    # Combine direction changes (fluctuations) and sudden jumps
+    total_inconsistencies = direction_changes + anomalies
+    
+    # Base consistency score (1.0 is perfect)
+    # We penalize 0.25 for every inconsistency in the timeline
+    consistency_score = max(0.1, 1.0 - (total_inconsistencies * 0.25))
+    
     avg_all_conf = sum(o["confidence"] for o in observations) / len(observations)
+    
     if avg_all_conf < 0.40:
         trend = "UNCERTAIN"
-
-    # 3. Trend Confidence
-    # Based on consistency of the trend and overall confidence
-    trend_confidence = min(1.0, avg_all_conf * 0.9 + (0.1 if trend != "UNCERTAIN" else 0.0))
+        
+    if trend == "UNCERTAIN":
+        consistency_score *= 0.5
+        
+    trend_confidence = avg_all_conf * consistency_score
     
     return {
         "current_condition": current_condition,

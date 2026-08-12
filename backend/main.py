@@ -69,10 +69,18 @@ async def analyze_images_endpoint(images: List[UploadFile] = File(...), sector: 
     try:
         if not images:
             raise HTTPException(status_code=400, detail="No images provided")
+        if len(images) > 10:
+            raise HTTPException(status_code=400, detail="Maximum 10 images allowed per request")
             
         observations = []
         for idx, img in enumerate(images):
+            if img.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {img.filename}")
+                
             contents = await img.read()
+            if len(contents) > 10 * 1024 * 1024: # 10MB limit per image
+                raise HTTPException(status_code=400, detail=f"File too large: {img.filename} exceeds 10MB")
+                
             pil_image = Image.open(io.BytesIO(contents))
             result = analyze_image(pil_image)
             
@@ -90,15 +98,23 @@ async def analyze_images_endpoint(images: List[UploadFile] = File(...), sector: 
 @app.post("/api/analyze/video", response_model=AnalysisResponse)
 async def analyze_video_endpoint(video: UploadFile = File(...), sector: str = Form("sector_1")):
     try:
+        if video.content_type not in ["video/mp4", "video/quicktime", "video/x-msvideo"]:
+            raise HTTPException(status_code=400, detail="Unsupported video format. Please upload MP4.")
+            
         # Save uploaded video to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             contents = await video.read()
+            if len(contents) > 100 * 1024 * 1024: # 100MB limit for video
+                raise HTTPException(status_code=400, detail="Video file too large. Maximum size is 100MB.")
             tmp.write(contents)
             tmp_path = tmp.name
 
         # Extract frames
-        frames = extract_frames(tmp_path, fps_target=0.5)
-        os.remove(tmp_path)
+        try:
+            frames = extract_frames(tmp_path, fps_target=0.5)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         
         if not frames:
             raise HTTPException(status_code=400, detail="Could not extract frames from video")
