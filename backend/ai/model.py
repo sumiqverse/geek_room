@@ -8,7 +8,8 @@ class VisionModel:
     def __init__(self):
         print("Initializing Hugging Face Inference API Request...")
         self.token = os.environ.get("HF_TOKEN", "")
-        self.api_url = "https://api-inference.huggingface.co/models/openai/clip-vit-base-patch32"
+        # The new updated endpoint that won't fail DNS on Render
+        self.api_url = "https://router.huggingface.co/hf-inference/models/openai/clip-vit-base-patch32"
         
         self.candidate_labels = [
             "a completely dry racing track surface, motorsport cars, tire smoke, clear weather",
@@ -36,10 +37,12 @@ class VisionModel:
             if self.token:
                 headers["Authorization"] = f"Bearer {self.token}"
             
-            # Use base64 encoding for the image inside the JSON payload
+            # Correct zero-shot payload format
             payload = {
-                "inputs": base64.b64encode(img_bytes).decode("utf-8"),
-                "parameters": {"candidate_labels": self.candidate_labels}
+                "inputs": {
+                    "image": base64.b64encode(img_bytes).decode("utf-8"),
+                    "candidate_labels": self.candidate_labels
+                }
             }
             
             response = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
@@ -58,5 +61,7 @@ class VisionModel:
                 
         except Exception as e:
             print(f"Error during API inference: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response: {e.response.text}")
             return {"condition": "UNCERTAIN", "confidence": 0.0}
 
