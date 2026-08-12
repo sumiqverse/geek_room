@@ -1,13 +1,15 @@
-from transformers import pipeline
+import os
 from PIL import Image
+from huggingface_hub import InferenceClient
 
 class VisionModel:
     def __init__(self):
-        print("Loading Hugging Face Zero-Shot Image Classification Model...")
-        self.classifier = pipeline(
-            "zero-shot-image-classification",
-            model="openai/clip-vit-base-patch32"
-        )
+        print("Initializing Hugging Face Inference API Client...")
+        # Get token from environment variables on Render
+        token = os.environ.get("HF_TOKEN")
+        self.client = InferenceClient(token=token)
+        self.model_id = "openai/clip-vit-base-patch32"
+        
         self.candidate_labels = [
             "a completely dry racing track surface, motorsport cars, tire smoke, clear weather",
             "a damp racing track with slight moisture and wet patches",
@@ -25,10 +27,22 @@ class VisionModel:
         if image.mode != "RGB":
             image = image.convert("RGB")
             
-        results = self.classifier(image, candidate_labels=self.candidate_labels)
-        top_result = results[0]
-        
-        return {
-            "condition": self.label_map[top_result["label"]],
-            "confidence": top_result["score"]
-        }
+        try:
+            results = self.client.zero_shot_image_classification(
+                image=image,
+                candidate_labels=self.candidate_labels,
+                model=self.model_id
+            )
+            
+            if results and len(results) > 0:
+                top_result = results[0]
+                return {
+                    "condition": self.label_map.get(top_result["label"], "UNCERTAIN"),
+                    "confidence": top_result["score"]
+                }
+            else:
+                return {"condition": "UNCERTAIN", "confidence": 0.0}
+        except Exception as e:
+            print(f"Error during API inference: {e}")
+            return {"condition": "UNCERTAIN", "confidence": 0.0}
+
