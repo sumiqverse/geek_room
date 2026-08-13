@@ -1,114 +1,135 @@
-﻿import numpy as np
+﻿import os
+import base64
+import json
+import re
+from io import BytesIO
 from PIL import Image
-import cv2
+import requests
 
 class VisionModel:
     """
-    Local image analysis for racing track condition detection.
-    Racing-specific algorithm: focuses on track region, saturation,
-    texture roughness, and spray detection.
-    No external API - zero DNS/network failures on Render.
+    Gemini Vision API for racing track condition detection.
+    Real ML inference via Google Gemini 1.5 Flash (free tier: 1500 req/day).
+    Falls back to local OpenCV heuristics if API key is missing.
     """
 
-    def __init__(self):
-        print("Initializing Local Vision Model v2 (Racing-Specific)...")
+    LABELS_PROMPT = (
+        "You are an expert motorsport safety analyst. Analyze this racing track image.\n"
+        "Classify the track surface as EXACTLY one of: WET, DAMP, or DRY.\n\n"
+        "WET  = Standing water, heavy rain, large water spray from cars, flooded patches\n"
+        "DAMP = Light moisture, drying surface, damp patches, light spray\n"
+        "DRY  = Completely dry tarmac, no visible moisture\n\n"
+        "Respond with ONLY valid JSON, no extra text:\n"
+        "{\"condition\": \"WET\", \"confidence\": 0.92}"
+    )
 
-    def _pil_to_bgr(self, image):
+    def __init__(self):
+        self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        self.gemini_url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-1.5-flash:generateContent"
+        )
+        if self.gemini_key:
+            print("Initializing Gemini Vision ML Model (gemini-1.5-flash)...")
+        else:
+            print("WARNING: GEMINI_API_KEY not set. Using local fallback.")
+
+    # ── Gemini ML inference ────────────────────────────────────────────────
+    def _gemini_infer(self, image: Image.Image) -> dict:
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        buf = BytesIO()
+        image.save(buf, format="JPEG")
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": self.LABELS_PROMPT},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.05,
+                "maxOutputTokens": 80
+            }
+        }
+
+        r = requests.post(
+            self.gemini_url,
+            params={"key": self.gemini_key},
+            json=payload,
+            timeout=25
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        print(f"[Gemini raw] {text}")
+
+        match = re.search(r'\{[^}]+\}', text, re.DOTALL)
+        if not match:
+            raise ValueError(f"No JSON in Gemini response: {text}")
+
+        result = json.loads(match.group())
+        condition = str(result.get("condition", "UNCERTAIN")).upper()
+        confidence = float(result.get("confidence", 0.7))
+
+        if condition not in ("WET", "DAMP", "DRY"):
+            condition = "UNCERTAIN"
+
+        return {"condition": condition, "confidence": round(min(0.99, max(0.0, confidence)), 4)}
+
+    # ── Local OpenCV fallback (no API key) ────────────────────────────────
+    def _local_infer(self, image: Image.Image) -> dict:
+        import numpy as np
+        import cv2
         if image.mode != "RGB":
             image = image.convert("RGB")
         arr = np.array(image)
-        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        img_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
-    def _analyze_track_condition(self, img_bgr):
-        """
-        Racing-specific wet track detection.
-
-        KEY INSIGHT: Wet racing tracks are NOT necessarily darker overall
-        (cameras auto-expose). The real indicators are:
-        1. LOW SATURATION in track region - wet asphalt = desaturated dark gray
-        2. TEXTURE SMOOTHNESS - wet = less Laplacian variance (smoother surface)
-        3. WATER SPRAY detection - hazy, desaturated bright pixels (mist/spray)
-        4. BLUE-RED RATIO - wet asphalt reflects sky (more blue than dry)
-        5. GRAY PIXEL DENSITY - wet asphalt = dark & desaturated pixels
-        6. HAZE/FOG - rain reduces global contrast
-        """
         h, w = img_bgr.shape[:2]
-
-        # Focus on track region: bottom 55% of image
-        track_top = int(h * 0.45)
-        track_bgr = img_bgr[track_top:, :]
+        track_bgr = img_bgr[int(h * 0.45):, :]
         th, tw = track_bgr.shape[:2]
 
         track_hsv = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
         t_sat = track_hsv[:, :, 1]
         t_val = track_hsv[:, :, 2]
+        gray  = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        b_t, _, r_t = cv2.split(track_bgr.astype(np.float32))
 
-        gray_track = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-        b_t, g_t, r_t = cv2.split(track_bgr.astype(np.float32))
+        mean_sat  = float(np.mean(t_sat))
+        lap       = cv2.Laplacian(gray, cv2.CV_64F)
+        tex_norm  = float(np.clip(np.var(lap) / 2000.0, 0, 1))
+        spray     = float(np.sum((t_val > 130) & (t_val < 245) & (t_sat < 35))) / (th * tw)
+        wet_asp   = float(np.sum((t_val < 140) & (t_sat < 55))) / (th * tw)
+        br_ratio  = float(np.mean((b_t + 1) / (r_t + 1)))
+        haze      = float(np.clip(1.0 - np.mean(np.abs(lap)) / 15.0, 0, 1))
 
-        # Feature 1: Mean saturation - wet asphalt = low sat
-        mean_sat = float(np.mean(t_sat))
+        wet  = float(np.clip(
+            0.30 * max(0.0, (80 - mean_sat) / 80) + 0.20 * wet_asp +
+            0.20 * min(1.0, spray / 0.12) + 0.15 * max(0.0, 1.0 - tex_norm) +
+            0.10 * max(0.0, (br_ratio - 0.95) / 0.3) + 0.05 * haze, 0, 1))
+        damp = float(np.clip(1.0 - abs(wet - 0.42) / 0.42, 0, 1)) * 0.80
+        dry  = float(np.clip(0.50 * tex_norm + 0.30 * min(1.0, mean_sat / 80.0) +
+                              0.20 * max(0.0, 1.0 - spray / 0.05), 0, 1))
 
-        # Feature 2: Texture roughness (Laplacian variance)
-        laplacian = cv2.Laplacian(gray_track, cv2.CV_64F)
-        texture_var = float(np.var(laplacian))
-        texture_norm = float(np.clip(texture_var / 2000.0, 0, 1))
+        scores = {"WET": wet, "DAMP": damp, "DRY": dry}
+        cond = max(scores, key=scores.get)
+        conf = round(min(0.85, max(0.45, scores[cond])), 4)
+        print(f"[LocalFallback] sat={mean_sat:.1f} wet={wet:.3f} dry={dry:.3f} -> {cond}")
+        return {"condition": cond, "confidence": conf}
 
-        # Feature 3: Water spray - medium brightness + very low saturation
-        spray_mask = (t_val > 130) & (t_val < 245) & (t_sat < 35)
-        spray_ratio = float(np.sum(spray_mask)) / (th * tw)
+    # ── Public API ────────────────────────────────────────────────────────
+    def infer(self, image: Image.Image) -> dict:
+        if self.gemini_key:
+            try:
+                result = self._gemini_infer(image)
+                print(f"[Gemini ML] -> {result['condition']} ({result['confidence']:.2%})")
+                return result
+            except Exception as e:
+                print(f"[Gemini ML] Error: {e}. Falling back to local.")
 
-        # Feature 4: Gray asphalt pixels - dark AND desaturated
-        wet_asphalt_mask = (t_val < 140) & (t_sat < 55)
-        wet_asphalt_ratio = float(np.sum(wet_asphalt_mask)) / (th * tw)
-
-        # Feature 5: Blue-Red ratio - wet reflects sky
-        br_ratio = float(np.mean((b_t + 1) / (r_t + 1)))
-
-        # Feature 6: Haziness
-        lap_mean_abs = float(np.mean(np.abs(laplacian)))
-        haziness = float(np.clip(1.0 - lap_mean_abs / 15.0, 0, 1))
-
-        # WET score
-        wet_score = (
-            0.30 * max(0.0, (80 - mean_sat) / 80) +
-            0.20 * wet_asphalt_ratio +
-            0.20 * min(1.0, spray_ratio / 0.12) +
-            0.15 * max(0.0, 1.0 - texture_norm) +
-            0.10 * max(0.0, (br_ratio - 0.95) / 0.3) +
-            0.05 * haziness
-        )
-        wet_score = float(np.clip(wet_score, 0, 1))
-
-        # DAMP score
-        damp_score = float(np.clip(1.0 - abs(wet_score - 0.42) / 0.42, 0, 1)) * 0.80
-
-        # DRY score
-        dry_score = (
-            0.50 * texture_norm +
-            0.30 * min(1.0, mean_sat / 80.0) +
-            0.20 * max(0.0, 1.0 - spray_ratio / 0.05)
-        )
-        dry_score = float(np.clip(dry_score, 0, 1))
-
-        scores = {"WET": wet_score, "DAMP": damp_score, "DRY": dry_score}
-        condition = max(scores, key=scores.get)
-        confidence = round(min(0.95, max(0.45, float(scores[condition]))), 4)
-
-        print(
-            f"[LocalVision v2] sat={mean_sat:.1f} texture={texture_norm:.3f} "
-            f"spray={spray_ratio:.3f} wetAsphalt={wet_asphalt_ratio:.3f} "
-            f"br_ratio={br_ratio:.3f} haze={haziness:.3f} | "
-            f"wet={wet_score:.3f} damp={damp_score:.3f} dry={dry_score:.3f} "
-            f"-> {condition} ({confidence:.2%})"
-        )
-
-        return {"condition": condition, "confidence": confidence}
-
-    def infer(self, image):
-        try:
-            img_bgr = self._pil_to_bgr(image)
-            return self._analyze_track_condition(img_bgr)
-        except Exception as e:
-            print(f"[LocalVision] Error: {e}")
-            return {"condition": "UNCERTAIN", "confidence": 0.0}
+        return self._local_infer(image)
