@@ -1,4 +1,4 @@
-﻿import os
+import os
 import base64
 import json
 import re
@@ -94,14 +94,17 @@ class VisionModel:
         track_bgr = img_bgr[int(h * 0.45):, :]
         th, tw = track_bgr.shape[:2]
 
+        # Keep HSV as float32 for threshold ops
         track_hsv = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
         t_sat = track_hsv[:, :, 1]
         t_val = track_hsv[:, :, 2]
-        gray  = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        # Keep gray as uint8 — OpenCV 5 doesn't support Laplacian(float32, CV_64F)
+        gray_u8 = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2GRAY)  # uint8
         b_t, _, r_t = cv2.split(track_bgr.astype(np.float32))
 
         mean_sat  = float(np.mean(t_sat))
-        lap       = cv2.Laplacian(gray, cv2.CV_64F)
+        # uint8 -> CV_32F is supported in OpenCV 5
+        lap       = cv2.Laplacian(gray_u8, cv2.CV_32F)
         tex_norm  = float(np.clip(np.var(lap) / 2000.0, 0, 1))
         spray     = float(np.sum((t_val > 130) & (t_val < 245) & (t_sat < 35))) / (th * tw)
         wet_asp   = float(np.sum((t_val < 140) & (t_sat < 55))) / (th * tw)
