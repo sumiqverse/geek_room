@@ -1,85 +1,114 @@
-import numpy as np
+﻿import numpy as np
 from PIL import Image
 import cv2
 
 class VisionModel:
     """
     Local image analysis for racing track condition detection.
-    Uses color science and pixel statistics — no external API required.
-    Eliminates DNS/network failures on Render/Vercel deployments.
+    Racing-specific algorithm: focuses on track region, saturation,
+    texture roughness, and spray detection.
+    No external API - zero DNS/network failures on Render.
     """
 
     def __init__(self):
-        print("Initializing Local Vision Model (PIL + OpenCV)...")
+        print("Initializing Local Vision Model v2 (Racing-Specific)...")
 
-    def _pil_to_bgr(self, image: Image.Image) -> np.ndarray:
+    def _pil_to_bgr(self, image):
         if image.mode != "RGB":
             image = image.convert("RGB")
         arr = np.array(image)
         return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
-    def _analyze_track_condition(self, img_bgr: np.ndarray) -> dict:
+    def _analyze_track_condition(self, img_bgr):
         """
-        Analyze track wetness using multiple visual cues:
-        1. Brightness (V channel HSV)  — wet tracks are darker
-        2. Saturation (S channel HSV)  — wet asphalt desaturates
-        3. Blue-channel ratio          — wet surfaces reflect sky (more blue)
-        4. Brightness std dev          — wet = high specular contrast
-        5. Dark pixel ratio            — wet regions are significantly darker
-        6. Specular reflection spots   — very bright spots on dark background
+        Racing-specific wet track detection.
+
+        KEY INSIGHT: Wet racing tracks are NOT necessarily darker overall
+        (cameras auto-expose). The real indicators are:
+        1. LOW SATURATION in track region - wet asphalt = desaturated dark gray
+        2. TEXTURE SMOOTHNESS - wet = less Laplacian variance (smoother surface)
+        3. WATER SPRAY detection - hazy, desaturated bright pixels (mist/spray)
+        4. BLUE-RED RATIO - wet asphalt reflects sky (more blue than dry)
+        5. GRAY PIXEL DENSITY - wet asphalt = dark & desaturated pixels
+        6. HAZE/FOG - rain reduces global contrast
         """
         h, w = img_bgr.shape[:2]
 
-        img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-        val = img_hsv[:, :, 2]   # brightness 0-255
+        # Focus on track region: bottom 55% of image
+        track_top = int(h * 0.45)
+        track_bgr = img_bgr[track_top:, :]
+        th, tw = track_bgr.shape[:2]
 
-        b, g, r = cv2.split(img_bgr.astype(np.float32))
+        track_hsv = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+        t_sat = track_hsv[:, :, 1]
+        t_val = track_hsv[:, :, 2]
 
-        mean_brightness = float(np.mean(val))
-        mean_saturation = float(np.mean(img_hsv[:, :, 1]))
+        gray_track = cv2.cvtColor(track_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        b_t, g_t, r_t = cv2.split(track_bgr.astype(np.float32))
 
-        total = b + g + r + 1e-6
-        blue_ratio = float(np.mean(b / total))
+        # Feature 1: Mean saturation - wet asphalt = low sat
+        mean_sat = float(np.mean(t_sat))
 
-        brightness_std = float(np.std(val))
+        # Feature 2: Texture roughness (Laplacian variance)
+        laplacian = cv2.Laplacian(gray_track, cv2.CV_64F)
+        texture_var = float(np.var(laplacian))
+        texture_norm = float(np.clip(texture_var / 2000.0, 0, 1))
 
-        dark_ratio  = float(np.sum(val < 80))  / (h * w)
-        bright_ratio = float(np.sum(val > 220)) / (h * w)
+        # Feature 3: Water spray - medium brightness + very low saturation
+        spray_mask = (t_val > 130) & (t_val < 245) & (t_sat < 35)
+        spray_ratio = float(np.sum(spray_mask)) / (th * tw)
 
-        # Wetness score [0..1]
-        wetness_score = (
-            0.30 * max(0.0, (120 - mean_brightness) / 120) +
-            0.20 * dark_ratio +
-            0.20 * max(0.0, (blue_ratio - 0.30) / 0.15) +
-            0.15 * min(1.0, bright_ratio / 0.05) +
-            0.15 * min(1.0, brightness_std / 60)
+        # Feature 4: Gray asphalt pixels - dark AND desaturated
+        wet_asphalt_mask = (t_val < 140) & (t_sat < 55)
+        wet_asphalt_ratio = float(np.sum(wet_asphalt_mask)) / (th * tw)
+
+        # Feature 5: Blue-Red ratio - wet reflects sky
+        br_ratio = float(np.mean((b_t + 1) / (r_t + 1)))
+
+        # Feature 6: Haziness
+        lap_mean_abs = float(np.mean(np.abs(laplacian)))
+        haziness = float(np.clip(1.0 - lap_mean_abs / 15.0, 0, 1))
+
+        # WET score
+        wet_score = (
+            0.30 * max(0.0, (80 - mean_sat) / 80) +
+            0.20 * wet_asphalt_ratio +
+            0.20 * min(1.0, spray_ratio / 0.12) +
+            0.15 * max(0.0, 1.0 - texture_norm) +
+            0.10 * max(0.0, (br_ratio - 0.95) / 0.3) +
+            0.05 * haziness
         )
-        wetness_score = float(np.clip(wetness_score, 0, 1))
+        wet_score = float(np.clip(wet_score, 0, 1))
 
-        # Dampness peaks at medium wetness
-        dampness_score = float(np.clip(1.0 - abs(wetness_score - 0.38) / 0.38, 0, 1))
-        dryness_score  = float(np.clip(1.0 - wetness_score, 0, 1))
+        # DAMP score
+        damp_score = float(np.clip(1.0 - abs(wet_score - 0.42) / 0.42, 0, 1)) * 0.80
 
-        scores = {
-            "WET":  wetness_score,
-            "DAMP": dampness_score * 0.75,
-            "DRY":  dryness_score,
-        }
-        condition  = max(scores, key=scores.get)
-        confidence = round(min(0.97, max(0.40, float(scores[condition]))), 4)
+        # DRY score
+        dry_score = (
+            0.50 * texture_norm +
+            0.30 * min(1.0, mean_sat / 80.0) +
+            0.20 * max(0.0, 1.0 - spray_ratio / 0.05)
+        )
+        dry_score = float(np.clip(dry_score, 0, 1))
 
-        print(f"[LocalVision] brightness={mean_brightness:.1f} sat={mean_saturation:.1f} "
-              f"blue={blue_ratio:.3f} dark={dark_ratio:.3f} specular={bright_ratio:.3f} "
-              f"wetness={wetness_score:.3f} → {condition} ({confidence:.2%})")
+        scores = {"WET": wet_score, "DAMP": damp_score, "DRY": dry_score}
+        condition = max(scores, key=scores.get)
+        confidence = round(min(0.95, max(0.45, float(scores[condition]))), 4)
+
+        print(
+            f"[LocalVision v2] sat={mean_sat:.1f} texture={texture_norm:.3f} "
+            f"spray={spray_ratio:.3f} wetAsphalt={wet_asphalt_ratio:.3f} "
+            f"br_ratio={br_ratio:.3f} haze={haziness:.3f} | "
+            f"wet={wet_score:.3f} damp={damp_score:.3f} dry={dry_score:.3f} "
+            f"-> {condition} ({confidence:.2%})"
+        )
 
         return {"condition": condition, "confidence": confidence}
 
-    def infer(self, image: Image.Image) -> dict:
+    def infer(self, image):
         try:
             img_bgr = self._pil_to_bgr(image)
             return self._analyze_track_condition(img_bgr)
         except Exception as e:
             print(f"[LocalVision] Error: {e}")
             return {"condition": "UNCERTAIN", "confidence": 0.0}
-
-
