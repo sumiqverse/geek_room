@@ -8,8 +8,9 @@ class VisionModel:
     def __init__(self):
         print("Initializing Hugging Face Inference API Request...")
         self.token = os.environ.get("HF_TOKEN", "")
-        # The new updated endpoint that won't fail DNS on Render
-        self.api_url = "https://router.huggingface.co/hf-inference/models/openai/clip-vit-base-patch32"
+        # Direct HF Inference API — supports CLIP zero-shot image classification
+        # router.huggingface.co/hf-inference does NOT support openai/clip-vit-base-patch32
+        self.api_url = "https://api-inference.huggingface.co/models/openai/clip-vit-base-patch32"
         
         self.candidate_labels = [
             "a completely dry racing track surface, motorsport cars, tire smoke, clear weather",
@@ -33,27 +34,39 @@ class VisionModel:
             image.save(buffered, format="JPEG")
             img_bytes = buffered.getvalue()
             
-            headers = {}
+            headers = {
+                "Content-Type": "application/json"
+            }
             if self.token:
                 headers["Authorization"] = f"Bearer {self.token}"
             
-            # Correct zero-shot payload format
+            # Direct HF Inference API uses image bytes + candidate_labels as parameters
+            # NOT base64 — send raw bytes with multipart OR use the JSON format below
             payload = {
-                "inputs": {
-                    "image": base64.b64encode(img_bytes).decode("utf-8"),
+                "inputs": base64.b64encode(img_bytes).decode("utf-8"),
+                "parameters": {
                     "candidate_labels": self.candidate_labels
                 }
             }
             
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=30)
+            response = requests.post(self.api_url, headers=headers, json=payload, timeout=45)
+            
+            # Handle model loading (503) — HF cold start
+            if response.status_code == 503:
+                print("Model is loading on HuggingFace, retrying after delay...")
+                import time
+                time.sleep(10)
+                response = requests.post(self.api_url, headers=headers, json=payload, timeout=45)
+            
             response.raise_for_status()
             results = response.json()
             
+            # HF returns list of {label, score} dicts sorted by score desc
             if isinstance(results, list) and len(results) > 0:
                 top_result = results[0]
                 return {
                     "condition": self.label_map.get(top_result["label"], "UNCERTAIN"),
-                    "confidence": top_result["score"]
+                    "confidence": round(top_result["score"], 4)
                 }
             else:
                 print(f"Unexpected response format: {results}")
